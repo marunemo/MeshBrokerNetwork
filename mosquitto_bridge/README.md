@@ -24,6 +24,7 @@ topic sensor2/# in 0
 cleansession false
 restart_timeout 5
 bridge_attempt_unsubscribe false
+try_private true
 
 # Bridge to RPi3
 connection MeshBroker3
@@ -34,6 +35,10 @@ topic sensor3/# in 0
 cleansession false
 restart_timeout 5
 bridge_attempt_unsubscribe false
+try_private true
+
+# Persistence settings for sessions and messages
+persistence true
 ```
 
 sudo systemctl restart mosquitto
