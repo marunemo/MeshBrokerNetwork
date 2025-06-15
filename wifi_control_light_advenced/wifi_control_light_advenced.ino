@@ -6,10 +6,10 @@
 #include <Wire.h>
 #include <BH1750.h>
 
-#include <ArduinoMqttClient.h>
+#include <PubSubClient.h>
 
 WiFiClient espClient;
-MqttClient mqttClient(espClient);
+PubSubClient mqttclient(espClient);
 
 // WiFi AP 리스트
 const char* ssidList[] = {"MeshBroker1"};
@@ -33,6 +33,29 @@ struct ApInfo {
   int rssi;
 };
 ApInfo apInfos[apCount]; 
+
+// mqtt 수신 콜백
+void onMessage(char* topic, byte* payload, unsigned int len) {
+  Serial.print("  ▶ ");
+  Serial.print(topic); Serial.print(" : ");
+  for (unsigned int i = 0; i < len; i++) Serial.write(payload[i]);
+  Serial.println();
+}
+
+void reconnect() {
+  while (!mqttclient.connected()) {
+    Serial.print("MQTT connect… ");
+    if (mqttclient.connect("arduinoClient")) {
+      Serial.println("OK");
+      // QoS 1 구독 가능
+      mqttclient.subscribe("test/topic", 1);   // QoS 1 구독
+    } else {
+      Serial.printf("failed (%d). 재시도…\n", mqttclient.state());
+      delay(2000);
+    }
+  }
+}
+
 
 //Display Message
 void showMessage(const String& line1, const String& line2 = "") {
@@ -96,9 +119,8 @@ void connectWiFi() {
         IPAddress localIP = WiFi.localIP();
         IPAddress brokerIP(localIP[0], localIP[1], localIP[2], 1);  // 마지막 옥텟만 1로
 
-        mqttClient.setId("arduinoClient");
-        mqttClient.connect(brokerIP, 1883);
-        Serial.printf("setServer to %s\n", brokerIP.toString().c_str());
+        mqttclient.setServer(brokerIP, 1883);
+        mqttclient.setCallback(onMessage);
 
         break;
       }
@@ -167,7 +189,7 @@ void setup() {
   // 전구 조절 핀 할당 (21)
   pinMode(21, OUTPUT);
 
-  mqttClient.subscribe("test/topic");
+  mqttclient.subscribe("test/topic");
 }
 
 void loop() {
@@ -198,18 +220,22 @@ void loop() {
   }
 
   // mqtt
-  mqttClient.poll();
-
-  if (mqttClient.parseMessage()) {
-    Serial.print("메시지: ");
-
-    String message = mqttClient.readString();
-    Serial.println(message);
-    if (message == "ON") {
-      digitalWrite(21, HIGH);
-    }
-    else if (message == "OFF") {
-      digitalWrite(21, LOW);
-    }
+  if (!mqttclient.connected()) {
+    reconnect();
   }
+
+  mqttclient.loop();      // 반드시 주기적으로 호출 (MQTT keep-alive & 콜백 처리)
+
+  // if (mqttclient.parseMessage()) {
+  //   Serial.print("메시지: ");
+
+  //   String message = mqttclient.readString();
+  //   Serial.println(message);
+  //   if (message == "ON") {
+  //     digitalWrite(21, HIGH);
+  //   }
+  //   else if (message == "OFF") {
+  //     digitalWrite(21, LOW);
+  //   }
+  // }
 }
