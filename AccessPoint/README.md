@@ -126,6 +126,7 @@ Create `/etc/wpa_supplicant/wpa_supplicant_broker2.conf` (for Broker2):
 ```ini
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
 update_config=1
+action_script=/etc/wpa_supplicant/action/on_connect.sh
 
 network={
     ssid="MeshBroker2"
@@ -138,6 +139,7 @@ Create `/etc/wpa_supplicant/wpa_supplicant_broker3.conf` (for Broker3):
 ```ini
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
 update_config=1
+action_script=/etc/wpa_supplicant/action/on_connect.sh
 
 network={
     ssid="MeshBroker3"
@@ -192,19 +194,16 @@ Each broker has its own systemd service to run `wpa_supplicant` in the backgroun
 ```ini
 [Unit]
 Description=Auto-connect to MeshBroker2
-After=network.target    # Start after the network is ready
+After=network.target
+Wants=network.target
 
 [Service]
-# Run wpa_supplicant in background for wlan2 using Broker2 config
-ExecStart=/sbin/wpa_supplicant -i wlan2 -c /etc/wpa_supplicant/wpa_supplicant_broker2.conf -D nl80211,wext
-
-# Use wpa_cli to monitor wpa_supplicant events and call hook script on connection
-ExecStartPost=/sbin/wpa_cli -i wlan2 -a /etc/wpa_supplicant/action/on_connect.sh
-
-Restart=always          # Restart service automatically on failure
+ExecStart=/sbin/wpa_supplicant -B -c /etc/wpa_supplicant/wpa_supplicant_broker2.conf -i wlan1
+Restart=on-failure
+RestartSec=5s
 
 [Install]
-WantedBy=multi-user.target  # Enable service to start at system boot
+WantedBy=multi-user.target
 ```
 
 #### Broker3 service (`/etc/systemd/system/broker3-connect.service`):
@@ -212,19 +211,16 @@ WantedBy=multi-user.target  # Enable service to start at system boot
 ```ini
 [Unit]
 Description=Auto-connect to MeshBroker3
-After=network.target    # Start after the network is ready
+After=network.target
+Wants=network.target
 
 [Service]
-# Run wpa_supplicant in background for wlan2 using Broker3 config
-ExecStart=/sbin/wpa_supplicant -i wlan2 -c /etc/wpa_supplicant/wpa_supplicant_broker3.conf -D nl80211,wext
-
-# Use wpa_cli to monitor wpa_supplicant events and call hook script on connection
-ExecStartPost=/sbin/wpa_cli -i wlan2 -a /etc/wpa_supplicant/action/on_connect.sh
-
-Restart=always          # Restart service automatically on failure
+ExecStart=/sbin/wpa_supplicant -B -c /etc/wpa_supplicant/wpa_supplicant_broker3.conf -i wlan2
+Restart=on-failure
+RestartSec=5s
 
 [Install]
-WantedBy=multi-user.target  # Enable service to start at system boot
+WantedBy=multi-user.target
 ```
 
 ---
@@ -237,4 +233,32 @@ Enable the appropriate broker service:
 sudo systemctl enable broker2-connect.service
 # or
 sudo systemctl enable broker3-connect.service
+```
+
+### 3.5 Assign Static IP
+To ensure the `wlan0` interface is active before assigning a static IP, you can use the following script. This prevents errors if `wlan0` is not yet up.
+
+```bash
+#!/bin/bash
+IFACE="wlan0"
+IP_ADDR="192.168.101.1/24"
+BROADCAST_ADDR="192.168.101.255"
+
+# Check if the interface is up
+if ip link show $IFACE | grep -q "UP"; then
+  echo "Interface $IFACE is up. Assigning static IP."
+  sudo ip addr add $IP_ADDR broadcast $BROADCAST_ADDR dev $IFACE
+else
+  echo "Interface $IFACE is down. Please ensure $IFACE is active before running this command."
+  echo "You might need to bring it up first, e.g., 'sudo ip link set dev $IFACE up'"
+  # Optional: Attempt to bring the interface up before assigning
+  # sudo ip link set dev $IFACE up
+  # sleep 2 # Give it a moment to come up
+  # sudo ip addr add $IP_ADDR broadcast $BROADCAST_ADDR dev $IFACE
+fi
+```
+
+```bash
+chmod +x assign_static_ip_wlan0.sh
+sudo ./assign_static_ip_wlan0.sh
 ```
