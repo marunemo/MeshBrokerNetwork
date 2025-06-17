@@ -47,7 +47,11 @@ Eclipse Mosquitto에서 **Redis Cluster 기반 persistence**와 **분산 세션 
 ```bash
 # Ubuntu/Debian
 sudo apt update
-sudo apt install -y libmosquitto-dev libhiredis-dev gcc make cmake redis-server
+sudo apt install -y libmosquitto-dev gcc make cmake redis-server
+
+git clone https://github.com/redis/hiredis.git
+cd hiredis
+sudo make install USE_SSL=1
 
 # Redis Cluster 라이브러리 설치
 git clone https://github.com/Nordix/hiredis-cluster.git
@@ -69,17 +73,55 @@ cd /etc/redis/cluster
 
 # 각 노드별 설정 파일 생성
 for port in 6379 6380 6381; do
-    sudo tee redis-${port}.conf 
-#include 
-#include 
-#include 
-#include 
-#include 
-#include 
-#include 
-#include 
-#include 
-#include 
+    sudo tee redis-${port}.conf << EOF
+port ${port}
+cluster-enabled yes
+cluster-config-file nodes-${port}.conf
+cluster-node-timeout 5000
+appendonly yes
+appendfilename "appendonly-${port}.aof"
+dbfilename dump-${port}.rdb
+logfile /var/log/redis/redis-${port}.log
+pidfile /var/run/redis/redis-${port}.pid
+dir /var/lib/redis/${port}/
+bind 0.0.0.0
+protected-mode no
+EOF
+
+    # 데이터 디렉터리 생성
+    sudo mkdir -p /var/lib/redis/${port}
+    sudo chown redis:redis /var/lib/redis/${port}
+done
+
+# Redis 서버 시작
+for port in 6379 6380 6381; do
+    echo "Starting Redis server on port ${port}..."
+    sudo redis-server /etc/redis/cluster/redis-${port}.conf --daemonize yes
+done
+
+# 클러스터 생성 대기
+sleep 5
+
+# 클러스터 초기화
+echo "Creating Redis cluster..."
+redis-cli --cluster create 127.0.0.1:6379 127.0.0.1:6380 127.0.0.1:6381 \
+    --cluster-replicas 0 --cluster-yes
+
+echo "Redis Cluster setup completed!"
+```
+
+```c
+#include <mosquitto_broker.h>
+#include <mosquitto_plugin.h>
+#include <hiredis/hiredis.h>
+#include <hiredis/hircluster.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <stdarg.h>
+#include <unistd.h>
+#include <pthread.h>
 
 // 전역 변수
 static redisClusterContext *cluster_ctx = NULL;
