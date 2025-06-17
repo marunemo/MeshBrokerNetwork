@@ -110,11 +110,14 @@ redis-cli --cluster create 127.0.0.1:6379 127.0.0.1:6380 127.0.0.1:6381 \
 echo "Redis Cluster setup completed!"
 ```
 
+### 3. Mosquitto 플러그인 구현
+redis_cluster_plugin.c - 완전한 분산 세션 관리 플러그인:
+
 ```c
 #include <mosquitto_broker.h>
 #include <mosquitto_plugin.h>
 #include <hiredis/hiredis.h>
-#include <hiredis/hircluster.h>
+#include <hiredis_cluster/hircluster.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -166,7 +169,17 @@ static redisReply* safe_redis_command(const char* format, ...) {
     int retry_count = 0;
     const int MAX_RETRIES = 3;
     
-    while (retry_count type != REDIS_REPLY_ERROR) {
+    while (retry_count < MAX_RETRIES) {
+        if (!cluster_ctx && init_redis_cluster() != 0) {
+            retry_count++;
+            continue;
+        }
+        
+        va_start(args, format);
+        reply = redisvClusterCommand(cluster_ctx, format, args);
+        va_end(args);
+        
+        if (reply && reply->type != REDIS_REPLY_ERROR) {
             return reply;
         }
         
@@ -268,7 +281,7 @@ static int sync_missed_messages(const char* node_id) {
     
     if (reply && reply->type == REDIS_REPLY_ARRAY) {
         int processed = 0;
-        for (int i = 0; i elements; i += 2) {
+        for (int i = 0; i < reply->elements; i += 2) {
             char *msg_key = reply->element[i]->str;
             // 누락된 메시지 처리 로직
             printf("[Redis Plugin] Processing missed message: %s\n", msg_key);
@@ -323,7 +336,20 @@ static int store_session_with_sync(const char* client_id, const char* session_da
     reply = safe_redis_command("WAIT 1 5000"); // 1개 replica, 5초 타임아웃
     if (reply) {
         int replicas_synced = reply->integer;
-        if (replicas_synced client_id);
+        if (replicas_synced < 1) {
+            fprintf(stderr, "[Redis Plugin] Warning: Session not replicated\n");
+        }
+        freeReplyObject(reply);
+    }
+    
+    return 0;
+}
+
+// 클라이언트 연결 이벤트
+static int on_connect(int event, void *event_data, void *userdata) {
+    struct mosquitto_evt_connect *conn = event_data;
+    
+    printf("[Redis Plugin] Client connecting: %s\n", conn->client_id);
     
     // 세션 락 획득 시도
     if (!acquire_session_lock(conn->client_id, 300)) {
@@ -352,8 +378,8 @@ static int store_session_with_sync(const char* client_id, const char* session_da
     // 구독 정보 복원
     reply = safe_redis_command("HGETALL subs:%s", conn->client_id);
     if (reply && reply->type == REDIS_REPLY_ARRAY) {
-        for (int i = 0; i elements; i += 2) {
-            if (i + 1 elements) {
+        for (int i = 0; i < reply->elements; i += 2) {
+            if (i + 1 < reply->elements) {
                 char *topic = reply->element[i]->str;
                 int qos = atoi(reply->element[i+1]->str);
                 printf("[Redis Plugin] Restored subscription: %s -> %s (QoS %d)\n", 
