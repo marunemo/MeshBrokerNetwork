@@ -114,6 +114,7 @@ echo "Redis Cluster setup completed!"
 redis_cluster_plugin.c - 완전한 분산 세션 관리 플러그인:
 
 ```c
+#include <mosquitto.h>
 #include <mosquitto_broker.h>
 #include <mosquitto_plugin.h>
 #include <hiredis/hiredis.h>
@@ -150,17 +151,31 @@ static int init_redis_cluster(void) {
         cluster_ctx = NULL;
     }
     
-    cluster_ctx = redisClusterConnectWithTimeout(redis_nodes, timeout, HIRCLUSTER_FLAG_NULL);
+    cluster_ctx = redisClusterContextInit();
+    if (!cluster_ctx) {
+        fprintf(stderr, "[Redis Plugin] Failed to create cluster context\n");
+        return -1;
+    }
     
-    if (!cluster_ctx || cluster_ctx->err) {
+    if (redisClusterSetOptionAddNodes(cluster_ctx, redis_nodes) != REDIS_OK) {
+        fprintf(stderr, "[Redis Plugin] Failed to add nodes\n");
+        redisClusterFree(cluster_ctx);
+        cluster_ctx = NULL;
+        return -1;
+    }
+    
+    if (redisClusterConnect2(cluster_ctx) != REDIS_OK) {
         fprintf(stderr, "[Redis Plugin] Cluster connection error: %s\n", 
-                cluster_ctx ? cluster_ctx->errstr : "Cannot allocate context");
+                cluster_ctx->errstr);
+        redisClusterFree(cluster_ctx);
+        cluster_ctx = NULL;
         return -1;
     }
     
     printf("[Redis Plugin] Successfully connected to Redis Cluster\n");
     return 0;
 }
+
 
 // 안전한 Redis 명령 실행
 static redisReply* safe_redis_command(const char* format, ...) {
@@ -176,7 +191,7 @@ static redisReply* safe_redis_command(const char* format, ...) {
         }
         
         va_start(args, format);
-        reply = redisvClusterCommand(cluster_ctx, format, args);
+        reply = redisClusterCommandArgv(cluster_ctx, format, args);
         va_end(args);
         
         if (reply && reply->type != REDIS_REPLY_ERROR) {
@@ -186,7 +201,8 @@ static redisReply* safe_redis_command(const char* format, ...) {
         if (reply) freeReplyObject(reply);
         
         if (cluster_ctx->err) {
-            fprintf(stderr, "[Redis Plugin] Redis error: %s, retrying...\n", cluster_ctx->errstr);
+            fprintf(stderr, "[Redis Plugin] Redis error: %s, retrying...\n", 
+                    cluster_ctx->errstr);
             init_redis_cluster();
         }
         
@@ -347,18 +363,24 @@ static int store_session_with_sync(const char* client_id, const char* session_da
 
 // 클라이언트 연결 이벤트
 static int on_connect(int event, void *event_data, void *userdata) {
-    struct mosquitto_evt_connect *conn = event_data;
+    struct mosquitto_evt_connect *conn = (struct mosquitto_evt_connect *)event_data;
+    
+    if (!conn || !conn->client_id) {
+        fprintf(stderr, "[Redis Plugin] Invalid connect event data\n");
+        return MOSQ_ERR_INVAL;
+    }
     
     printf("[Redis Plugin] Client connecting: %s\n", conn->client_id);
     
     // 세션 락 획득 시도
     if (!acquire_session_lock(conn->client_id, 300)) {
-        printf("[Redis Plugin] Session already owned by another broker: %s\n", conn->client_id);
+        printf("[Redis Plugin] Session already owned by another broker: %s\n", 
+               conn->client_id);
         
-        // 잠시 대기 후 재시도
         sleep(1);
         if (!acquire_session_lock(conn->client_id, 300)) {
-            printf("[Redis Plugin] Failed to acquire session lock: %s\n", conn->client_id);
+            printf("[Redis Plugin] Failed to acquire session lock: %s\n", 
+                   conn->client_id);
             return MOSQ_ERR_AUTH;
         }
     }
@@ -505,6 +527,7 @@ int mosquitto_plugin_init(mosquitto_plugin_id_t *identifier, void **user_data,
     for (int i = 0; i < opt_count; i++) {
         if (strcmp(opts[i].key, "redis_nodes") == 0) {
             strncpy(redis_nodes, opts[i].value, sizeof(redis_nodes) - 1);
+            redis_nodes[sizeof(redis_nodes) - 1] = '\0';
         } else if (strcmp(opts[i].key, "broker_port") == 0) {
             broker_port = atoi(opts[i].value);
         }
@@ -523,12 +546,20 @@ int mosquitto_plugin_init(mosquitto_plugin_id_t *identifier, void **user_data,
     // 재시작 시 누락 메시지 동기화
     sync_missed_messages(broker_id);
     
-    // 이벤트 콜백 등록
-    mosquitto_callback_register(identifier, MOSQ_EVT_MESSAGE, on_message, NULL, NULL);
-    mosquitto_callback_register(identifier, MOSQ_EVT_CONNECT, on_connect, NULL, NULL);
-    mosquitto_callback_register(identifier, MOSQ_EVT_DISCONNECT, on_disconnect, NULL, NULL);
-    mosquitto_callback_register(identifier, MOSQ_EVT_SUBSCRIBE, on_subscribe, NULL, NULL);
-    mosquitto_callback_register(identifier, MOSQ_EVT_UNSUBSCRIBE, on_unsubscribe, NULL, NULL);
+    // 이벤트 콜백 등록 - 올바른 순서와 방법
+    if (mosquitto_callback_register(identifier, MOSQ_EVT_MESSAGE, on_message, NULL, NULL) != MOSQ_ERR_SUCCESS ||
+        mosquitto_callback_register(identifier, MOSQ_EVT_CONNECT, on_connect, NULL, NULL) != MOSQ_ERR_SUCCESS ||
+        mosquitto_callback_register(identifier, MOSQ_EVT_DISCONNECT, on_disconnect, NULL, NULL) != MOSQ_ERR_SUCCESS ||
+        mosquitto_callback_register(identifier, MOSQ_EVT_SUBSCRIBE, on_subscribe, NULL, NULL) != MOSQ_ERR_SUCCESS ||
+        mosquitto_callback_register(identifier, MOSQ_EVT_UNSUBSCRIBE, on_unsubscribe, NULL, NULL) != MOSQ_ERR_SUCCESS) {
+        
+        fprintf(stderr, "[Redis Plugin] Failed to register callbacks\n");
+        if (cluster_ctx) {
+            redisClusterFree(cluster_ctx);
+            cluster_ctx = NULL;
+        }
+        return MOSQ_ERR_UNKNOWN;
+    }
     
     printf("[Redis Plugin] Plugin initialized successfully\n");
     return MOSQ_ERR_SUCCESS;
