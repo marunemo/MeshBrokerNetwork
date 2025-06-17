@@ -191,7 +191,7 @@ static redisReply* safe_redis_command(const char* format, ...) {
         }
         
         va_start(args, format);
-        reply = redisClusterCommandArgv(cluster_ctx, format, args);
+        reply = redisClusterCommand(cluster_ctx, format, args);
         va_end(args);
         
         if (reply && reply->type != REDIS_REPLY_ERROR) {
@@ -363,56 +363,58 @@ static int store_session_with_sync(const char* client_id, const char* session_da
 
 // 클라이언트 연결 이벤트
 static int on_connect(int event, void *event_data, void *userdata) {
-    struct mosquitto_evt_connect *conn = (struct mosquitto_evt_connect *)event_data;
+    struct mosquitto_evt_connect *conn = event_data;
     
-    if (!conn || !conn->client_id) {
-        fprintf(stderr, "[Redis Plugin] Invalid connect event data\n");
+    if (!conn || !conn->client) {
         return MOSQ_ERR_INVAL;
     }
     
-    printf("[Redis Plugin] Client connecting: %s\n", conn->client_id);
+    const char *client_id = mosquitto_client_id(conn->client);
+    if (!client_id) {
+        return MOSQ_ERR_INVAL;
+    }
+    
+    printf("[Redis Plugin] Client connecting: %s\n", client_id);
     
     // 세션 락 획득 시도
-    if (!acquire_session_lock(conn->client_id, 300)) {
-        printf("[Redis Plugin] Session already owned by another broker: %s\n", 
-               conn->client_id);
+    if (!acquire_session_lock(client_id, 300)) {
+        printf("[Redis Plugin] Session already owned by another broker: %s\n", client_id);
         
         sleep(1);
-        if (!acquire_session_lock(conn->client_id, 300)) {
-            printf("[Redis Plugin] Failed to acquire session lock: %s\n", 
-                   conn->client_id);
+        if (!acquire_session_lock(client_id, 300)) {
+            printf("[Redis Plugin] Failed to acquire session lock: %s\n", client_id);
             return MOSQ_ERR_AUTH;
         }
     }
     
-    printf("[Redis Plugin] Session lock acquired for: %s\n", conn->client_id);
+    printf("[Redis Plugin] Session lock acquired for: %s\n", client_id);
     
     // 기존 세션 정보 복원
     char session_key[256];
-    snprintf(session_key, sizeof(session_key), "session:%s", conn->client_id);
+    snprintf(session_key, sizeof(session_key), "session:%s", client_id);
     
     redisReply *reply = safe_redis_command("HGETALL %s", session_key);
     if (reply && reply->type == REDIS_REPLY_ARRAY) {
-        printf("[Redis Plugin] Restoring session for: %s\n", conn->client_id);
+        printf("[Redis Plugin] Restoring session for: %s\n", client_id);
         freeReplyObject(reply);
     }
     
     // 구독 정보 복원
-    reply = safe_redis_command("HGETALL subs:%s", conn->client_id);
+    reply = safe_redis_command("HGETALL subs:%s", client_id);
     if (reply && reply->type == REDIS_REPLY_ARRAY) {
         for (int i = 0; i < reply->elements; i += 2) {
             if (i + 1 < reply->elements) {
                 char *topic = reply->element[i]->str;
                 int qos = atoi(reply->element[i+1]->str);
                 printf("[Redis Plugin] Restored subscription: %s -> %s (QoS %d)\n", 
-                       conn->client_id, topic, qos);
+                       client_id, topic, qos);
             }
         }
         freeReplyObject(reply);
     }
     
     // 세션 정보 업데이트
-    store_session_with_sync(conn->client_id, "connected");
+    store_session_with_sync(client_id, "connected");
     
     return MOSQ_ERR_SUCCESS;
 }
@@ -421,22 +423,34 @@ static int on_connect(int event, void *event_data, void *userdata) {
 static int on_disconnect(int event, void *event_data, void *userdata) {
     struct mosquitto_evt_disconnect *disc = event_data;
     
-    printf("[Redis Plugin] Client disconnecting: %s\n", disc->client_id);
+    if (!disc || !disc->client) {
+        return MOSQ_ERR_INVAL;
+    }
+    
+    const char *client_id = mosquitto_client_id(disc->client);
+    if (!client_id) {
+        return MOSQ_ERR_INVAL;
+    }
+    
+    printf("[Redis Plugin] Client disconnecting: %s\n", client_id);
+
+    // clean_session 정보는 mosquitto_client_clean_session() 함수로 확인
+    bool clean_session = mosquitto_client_clean_session(disc->client);
     
     // Clean session이 아닌 경우에만 세션 유지
-    if (!disc->clean_session) {
-        store_session_with_sync(disc->client_id, "disconnected");
-        printf("[Redis Plugin] Session preserved for: %s\n", disc->client_id);
+    if (!clean_session) {
+        store_session_with_sync(client_id, "disconnected");
+        printf("[Redis Plugin] Session preserved for: %s\n", client_id);
     } else {
         // Clean session인 경우 세션 완전 삭제
         char session_key[256];
-        snprintf(session_key, sizeof(session_key), "session:%s", disc->client_id);
+        snprintf(session_key, sizeof(session_key), "session:%s", client_id);
         
         safe_redis_command("DEL %s", session_key);
-        safe_redis_command("DEL subs:%s", disc->client_id);
-        release_session_lock(disc->client_id);
+        safe_redis_command("DEL subs:%s", client_id);
+        release_session_lock(client_id);
         
-        printf("[Redis Plugin] Session cleaned for: %s\n", disc->client_id);
+        printf("[Redis Plugin] Session cleaned for: %s\n", client_id);
     }
     
     return MOSQ_ERR_SUCCESS;
@@ -446,8 +460,17 @@ static int on_disconnect(int event, void *event_data, void *userdata) {
 static int on_subscribe(int event, void *event_data, void *userdata) {
     struct mosquitto_evt_subscribe *sub = event_data;
     
+    if (!sub || !sub->client) {
+        return MOSQ_ERR_INVAL;
+    }
+    
+    const char *client_id = mosquitto_client_id(sub->client);
+    if (!client_id) {
+        return MOSQ_ERR_INVAL;
+    }
+    
     printf("[Redis Plugin] Client subscribed: %s -> %s (QoS %d)\n", 
-           sub->client_id, sub->topic, sub->qos);
+           client_id, sub->topic, sub->qos);
     
     redisReply *reply = safe_redis_command("HSET subs:%s %s %d", 
                                           sub->client_id, sub->topic, sub->qos);
@@ -460,11 +483,20 @@ static int on_subscribe(int event, void *event_data, void *userdata) {
 static int on_unsubscribe(int event, void *event_data, void *userdata) {
     struct mosquitto_evt_unsubscribe *unsub = event_data;
     
+    if (!unsub || !unsub->client) {
+        return MOSQ_ERR_INVAL;
+    }
+    
+    const char *client_id = mosquitto_client_id(unsub->client);
+    if (!client_id) {
+        return MOSQ_ERR_INVAL;
+    }
+    
     printf("[Redis Plugin] Client unsubscribed: %s -> %s\n", 
-           unsub->client_id, unsub->topic);
+           client_id, unsub->topic);
     
     redisReply *reply = safe_redis_command("HDEL subs:%s %s", 
-                                          unsub->client_id, unsub->topic);
+                                          client_id, unsub->topic);
     if (reply) freeReplyObject(reply);
     
     return MOSQ_ERR_SUCCESS;
@@ -474,23 +506,34 @@ static int on_unsubscribe(int event, void *event_data, void *userdata) {
 static int on_message(int event, void *event_data, void *userdata) {
     struct mosquitto_evt_message *msg = event_data;
     
+    if (!msg || !msg->client) {
+        return MOSQ_ERR_INVAL;
+    }
+    
+    // client_id는 mosquitto_client_id() 함수로 접근
+    const char *client_id = mosquitto_client_id(msg->client);
+    if (!client_id) {
+        fprintf(stderr, "[Redis Plugin] Failed to get client ID\n");
+        return MOSQ_ERR_INVAL;
+    }
+    
     // 강화된 메시지 중복 체크
-    if (check_message_duplicate_enhanced(msg->client_id, msg->mid, msg->topic)) {
+    if (check_message_duplicate_enhanced(client_id, msg->mid, msg->topic)) {
         printf("[Redis Plugin] Duplicate message detected: %s:%d:%s\n", 
-               msg->client_id, msg->mid, msg->topic);
+               client_id, msg->mid, msg->topic);
         return MOSQ_ERR_SUCCESS;
     }
     
     printf("[Redis Plugin] Message received: %s -> %s (QoS %d, Retain %d)\n", 
-           msg->client_id, msg->topic, msg->qos, msg->retain);
+           client_id, msg->topic, msg->qos, msg->retain);
     
     // 글로벌 메시지 로그에 저장
     long long global_msg_id = store_global_message_log(
-        msg->client_id, msg->topic, msg->payload, msg->payloadlen, msg->qos, msg->retain);
+        client_id, msg->topic, msg->payload, msg->payloadlen, msg->qos, msg->retain);
     
     // 클라이언트별 메시지 저장
     char msg_key[256];
-    snprintf(msg_key, sizeof(msg_key), "msg:%s:%d", msg->client_id, msg->mid);
+    snprintf(msg_key, sizeof(msg_key), "msg:%s:%d", client_id, msg->mid);
     
     redisReply *reply = safe_redis_command(
         "HMSET %s topic %s payload %b qos %d retain %d timestamp %ld global_id %lld",
@@ -507,7 +550,7 @@ static int on_message(int event, void *event_data, void *userdata) {
     
     // 중복 방지 키 설정 (TTL: QoS에 따라)
     int ttl = (msg->qos > 0) ? 86400 : 3600;
-    set_duplicate_prevention_key(msg->client_id, msg->mid, msg->topic, ttl);
+    set_duplicate_prevention_key(client_id, msg->mid, msg->topic, ttl);
     
     return MOSQ_ERR_SUCCESS;
 }
@@ -548,10 +591,7 @@ int mosquitto_plugin_init(mosquitto_plugin_id_t *identifier, void **user_data,
     
     // 이벤트 콜백 등록 - 올바른 순서와 방법
     if (mosquitto_callback_register(identifier, MOSQ_EVT_MESSAGE, on_message, NULL, NULL) != MOSQ_ERR_SUCCESS ||
-        mosquitto_callback_register(identifier, MOSQ_EVT_CONNECT, on_connect, NULL, NULL) != MOSQ_ERR_SUCCESS ||
-        mosquitto_callback_register(identifier, MOSQ_EVT_DISCONNECT, on_disconnect, NULL, NULL) != MOSQ_ERR_SUCCESS ||
-        mosquitto_callback_register(identifier, MOSQ_EVT_SUBSCRIBE, on_subscribe, NULL, NULL) != MOSQ_ERR_SUCCESS ||
-        mosquitto_callback_register(identifier, MOSQ_EVT_UNSUBSCRIBE, on_unsubscribe, NULL, NULL) != MOSQ_ERR_SUCCESS) {
+        mosquitto_callback_register(identifier, MOSQ_EVT_DISCONNECT, on_disconnect, NULL, NULL) != MOSQ_ERR_SUCCESS) {
         
         fprintf(stderr, "[Redis Plugin] Failed to register callbacks\n");
         if (cluster_ctx) {
