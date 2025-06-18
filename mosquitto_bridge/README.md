@@ -21,7 +21,7 @@ Install necessary development libraries and tools:
 
 ```bash
 sudo apt update
-sudo apt install git libssl-dev xsltproc
+sudo apt install git libssl-dev xsltproc docbook-xml docbook-xsl
 ```
 
 ---

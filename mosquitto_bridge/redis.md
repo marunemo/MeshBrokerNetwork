@@ -45,7 +45,6 @@ Eclipse Mosquitto에서 **Redis Cluster 기반 persistence**와 **분산 세션 
 ### 1. 의존성 설치
 
 ```bash
-# Ubuntu/Debian
 sudo apt update
 sudo apt install -y libmosquitto-dev gcc make cmake redis-server
 
@@ -134,7 +133,7 @@ redis_cluster_plugin.c - 완전한 분산 세션 관리 플러그인:
 
 // 전역 변수
 static redisClusterContext *cluster_ctx = NULL;
-static char redis_nodes[1024] = "127.0.0.1:6379,127.0.0.1:6380,127.0.0.1:6381";
+static char redis_nodes[1024] = "192.168.100.1:7001,192.168.100.2:7002,192.168.100.3:7003";
 static char broker_id[64];
 static int broker_port = 1883;
 static long long global_message_counter = 0;
@@ -574,6 +573,12 @@ int mosquitto_plugin_cleanup(void *user_data, struct mosquitto_opt *opts, int op
 ```bash
 #!/bin/bash
 
+redis-cli --cluster create \
+192.168.0.10:7000 \
+192.168.0.11:7001 \
+--cluster-replicas 0
+
+
 echo "Building and installing Redis Cluster Mosquitto Plugin..."
 
 # 플러그인 컴파일
@@ -581,7 +586,7 @@ echo "/usr/local/lib" | sudo tee /etc/ld.so.conf.d/local.conf
 sudo ldconfig
 
 gcc -fPIC -shared -o redis_cluster_plugin.so redis_cluster_plugin.c \
-    -L/usr/local/lib -lmosquitto -lhiredis -lhircluster -lpthread -lcjson
+    -L/usr/local/lib -lmosquitto -lhiredis -lhiredis_cluster -lpthread -lcjson
 
 # 플러그인 설치
 sudo cp redis_cluster_plugin.so /usr/lib/mosquitto/
