@@ -577,10 +577,11 @@ int mosquitto_plugin_cleanup(void *user_data, struct mosquitto_opt *opts, int op
 echo "Building and installing Redis Cluster Mosquitto Plugin..."
 
 # 플러그인 컴파일
-export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+echo "/usr/local/lib" | sudo tee /etc/ld.so.conf.d/local.conf
+sudo ldconfig
 
 gcc -fPIC -shared -o redis_cluster_plugin.so redis_cluster_plugin.c \
-    -L/usr/local/lib -lmosquitto -lhiredis -lhircluster -lpthread
+    -L/usr/local/lib -lmosquitto -lhiredis -lhircluster -lpthread -lcjson
 
 # 플러그인 설치
 sudo cp redis_cluster_plugin.so /usr/lib/mosquitto/
