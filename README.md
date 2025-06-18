@@ -1,4 +1,12 @@
-# 🏗️ 아키텍처
+# MeshBroker Network
+
+이 시스템은 Redis Cluster와 Eclipse Mosquitto를 활용하여 distributed Mesh Network로 MQTT broker 시스템을 구축하는 README입니다.
+
+## 시스템 아키텍처
+
+이 시스템은 분산형 아키텍처를 채택하여 각 노드가 독립적으로 작동하면서도 상호 연결된 구조를 형성합니다. 시스템의 핵심 구성요소는 다음과 같습니다:
+
+각 노드는 Mosquitto MQTT 브로커와 Redis 노드를 포함하며, 이들이 Redis Cluster를 통해 연결되어 데이터 동기화와 메시지 라우팅을 담당합니다. 이러한 구조는 단일 장애점(Single Point of Failure)을 제거하고 시스템의 복원력을 향상시킵니다. 노드 간의 통신은 브리지 연결을 통해 이루어지며, 각 노드는 필요에 따라 Wi-Fi 액세스 포인트 역할도 수행할 수 있습니다.
 
 ```
 ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
@@ -15,33 +23,28 @@
 └─────────────┘    └─────────────┘    └─────────────┘
        │                   │                   │
        └───────────────────┼───────────────────┘
-                          │
-                 Redis Cluster
+                           │
+                     Redis Cluster
 ```
 
-# MeshBroker Wi-Fi Access Point Setup
+## Wi-Fi 액세스 포인트 설정
 
-This guide sets up a Linux-based device (e.g., Raspberry Pi) as a Wi-Fi Access Point (AP) with IP routing and automatic connection to another mesh broker.
+### 액세스 포인트 구성 개요
 
----
+메쉬 브로커 시스템에서 각 노드는 Wi-Fi 액세스 포인트로 동작하여 클라이언트 기기들이 네트워크에 접속할 수 있는 진입점을 제공합니다. 이 설정은 hostapd와 dnsmasq를 활용하여 구현되며, 동시에 다른 메쉬 브로커 노드들과의 연결도 관리합니다.
 
-## 📡 1. AP Setting (hostapd + dnsmasq)
+### 필수 요구사항 및 의존성 설치
 
-### 1.1 Requirements
-
-- Internet access
-- Linux system with wireless interfaces (`wlan0`, `wlan1`, `wlan2`)
-
-### 1.2 Install Dependencies
+시스템 구성을 위해서는 무선 인터페이스가 최소 3개(`wlan0`, `wlan1`, `wlan2`) 필요하며, 각각 액세스 포인트 제공, 메쉬 노드 간 연결, 그리고 추가 브로커 연결 용도로 사용됩니다. 인터넷 접속이 가능한 환경에서 다음 패키지들을 설치해야 합니다:
 
 ```bash
 sudo apt update
 sudo apt install hostapd dnsmasq
 ```
 
-### 1.3 Configure hostapd
+### hostapd 설정
 
-Create `/etc/hostapd/hostapd.conf`:
+hostapd는 Linux에서 소프트웨어 액세스 포인트를 생성하는 데 사용되는 핵심 데몬입니다. 설정 파일 `/etc/hostapd/hostapd.conf`를 생성하여 액세스 포인트의 동작 방식을 정의합니다:
 
 ```ini
 interface=wlan0
@@ -58,17 +61,15 @@ wpa_key_mgmt=WPA-PSK
 rsn_pairwise=CCMP
 ```
 
-Edit `/etc/default/hostapd`:
-
-Uncomment and set the path:
+이 설정에서 `hw_mode=g`는 2.4GHz 대역을 사용함을 의미하며, `wmm_enabled=1`은 QoS(Quality of Service) 기능을 활성화하여 네트워크 성능을 최적화합니다. `/etc/default/hostapd` 파일에서 설정 파일 경로를 지정해야 합니다:
 
 ```bash
 DAEMON_CONF="/etc/hostapd/hostapd.conf"
 ```
 
-### 1.4 Configure dnsmasq
+### DHCP 서버 설정
 
-Edit `/etc/dnsmasq.conf`:
+dnsmasq는 경량화된 DHCP 및 DNS 서버로, 액세스 포인트에 연결되는 클라이언트들에게 IP 주소를 자동으로 할당합니다. `/etc/dnsmasq.conf` 파일을 편집하여 DHCP 서비스를 구성합니다:
 
 ```ini
 interface=wlan0
@@ -77,75 +78,67 @@ dhcp-option=3,192.168.101.1
 server=8.8.8.8
 ```
 
-### 1.5 Assign Static IP
+이 설정에서 `dhcp-range`는 클라이언트에게 할당될 IP 주소 범위를 정의하며, `dhcp-option=3`은 기본 게이트웨이를 지정합니다. `server=8.8.8.8`은 DNS 서버로 Google의 공개 DNS를 사용하도록 설정합니다.
+
+### 네트워크 인터페이스 설정 및 서비스 시작
+
+액세스 포인트용 인터페이스에 고정 IP 주소를 할당하고 관련 서비스들을 시작합니다:
 
 ```bash
 sudo ip addr add 192.168.101.1/24 broadcast 192.168.101.255 dev wlan0
 ```
-
-### 1.6 Start Services
 
 ```bash
 sudo systemctl unmask hostapd
 sudo systemctl enable --now hostapd dnsmasq
 ```
 
----
+`systemctl unmask` 명령은 이전에 비활성화되었던 hostapd 서비스를 다시 활성화 가능한 상태로 만들며, `enable --now` 옵션은 서비스를 즉시 시작하고 부팅 시 자동 시작되도록 설정합니다.
 
-## 🔀 2. IP Routing (NAT & Forwarding)
+## IP 라우팅 및 NAT 설정
 
-### 2.1 Enable IP Forwarding
+### IP 포워딩 활성화
 
-Edit `/etc/sysctl.conf` and uncomment:
+메쉬 네트워크에서 노드 간 트래픽 라우팅을 위해 IP 포워딩 기능을 활성화해야 합니다. 이는 하나의 네트워크 인터페이스로 수신된 패킷을 다른 인터페이스로 전달할 수 있게 해주는 중요한 설정입니다. `/etc/sysctl.conf` 파일에서 다음 라인의 주석을 제거합니다:
 
 ```ini
 net.ipv4.ip_forward=1
 ```
 
-Apply:
+설정을 즉시 적용하기 위해 다음 명령을 실행합니다:
 
 ```bash
 sudo sysctl -p
 ```
 
-### 2.2 Install iptables
+### iptables 설치 및 NAT 규칙 설정
+
+네트워크 주소 변환(NAT) 기능을 구현하기 위해 iptables를 설치하고 규칙을 설정합니다:
 
 ```bash
 sudo apt install iptables
-```
 
-### 2.3 Connect to Broker2 (via wlan2)
-
-```bash
-sudo wpa_passphrase "MeshBroker2" "12345678" | sudo tee /etc/wpa_supplicant/wpa_supplicant_broker2.conf
-sudo wpa_supplicant -B -c /etc/wpa_supplicant/wpa_supplicant_broker2.conf -i wlan2
-sudo dhclient wlan1
 sudo iptables -t nat -A POSTROUTING -o wlan1 -j MASQUERADE
 ```
 
-### Connect to Broker3
+이는 후술할 IBSS모드의 다른 메쉬 브로커 노드들과의 연결을 라우팅할 때 사용됩니다.
 
-```bash
-sudo wpa_passphrase "MeshBroker3" "12345678" | sudo tee /etc/wpa_supplicant/wpa_supplicant_broker3.conf
-sudo wpa_supplicant -B -c /etc/wpa_supplicant/wpa_supplicant_broker3.conf -i wlan2
-sudo dhclient wlan2
-sudo iptables -t nat -A POSTROUTING -o wlan2 -j MASQUERADE
-```
+## IBSS Ad-hoc 메쉬 네트워크 설정
 
-> ✅ Replace `wlan1` or `wlan2` with your actual device name using `ip a`.
+### IBSS 네트워크 개요
 
+IBSS(Independent Basic Service Set)는 중앙 집중식 액세스 포인트 없이 무선 기기들이 직접 연결되는 애드혹 네트워크 모드입니다. 메쉬 브로커 시스템에서는 이 기술을 활용하여 브로커 간 직접 통신 채널을 구성합니다.
 
-# IBSS (Ad-hoc Mesh) Network Server Setup
+### IBSS 시작 스크립트 생성
 
-## 1. Create the IBSS Startup Script
-
-Create the following script to configure your wireless interface (replace `wlan1` with your actual interface name):
+IBSS 네트워크 설정을 자동화하기 위한 스크립트를 생성합니다. 실제 환경에서는 `wlan1`을 사용 중인 무선 인터페이스 이름으로 교체해야 합니다:
 
 ```bash
 sudo vi /usr/local/bin/start_ibss_server.sh
 ```
 
-**Example contents:**
+스크립트 내용:
+
 ```bash
 #!/bin/bash
 
@@ -172,25 +165,24 @@ iw dev $WLAN_IFACE ibss join $SSID $CHANNEL_MHZ fixed-freq
 ip addr add 192.168.100.1/24 dev $WLAN_IFACE
 ```
 
----
+이 스크립트는 무선 인터페이스를 IBSS 모드로 전환하고 지정된 주파수(2437MHz, 채널 6)에서 네트워크에 참여하며, 고정 IP 주소를 할당합니다.
 
-## 2. Make the Script Executable
+### 스크립트 실행 권한 설정 및 systemd 서비스 생성
+
+스크립트를 실행 가능하게 만들고 시스템 부팅 시 자동으로 실행되도록 설정합니다:
 
 ```bash
 sudo chmod +x /usr/local/bin/start_ibss_server.sh
 ```
 
----
-
-## 3. Create a systemd Service
-
-Set up a systemd service to run your script automatically at boot:
+systemd 서비스 파일을 생성하여 IBSS 네트워크를 자동으로 시작하도록 구성합니다:
 
 ```bash
 sudo vi /etc/systemd/system/ibss-server.service
 ```
 
-**Example contents:**
+서비스 파일 내용:
+
 ```ini
 [Unit]
 Description=Start IBSS Ad-hoc Server
@@ -205,41 +197,30 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 ```
 
----
+`Type=oneshot`은 스크립트가 한 번 실행되고 종료되는 서비스임을 의미하며, `RemainAfterExit=yes`는 프로세스 종료 후에도 서비스가 활성 상태로 유지되도록 합니다.
 
-## 4. Enable and Start the Service
-
-Enable and start the IBSS server service:
+서비스를 시작합니다:
 
 ```bash
 sudo systemctl start ibss-server.service
 ```
 
----
+## MQTT 브리지 및 개발 환경 설정
 
-# Mesh Network Server: MQTT Bridge
+### 핵심 개발 도구 설치
 
-This guide walks you through setting up essential components for a mesh network server:
-- Core development tools
-- cJSON library
-- Eclipse Mosquitto MQTT broker with mesh bridging
-
----
-
-## 1. Install Required Packages
-
-Install necessary development libraries and tools:
+메쉬 네트워크 서버 구축을 위한 필수 개발 라이브러리와 도구들을 설치합니다. 이러한 도구들은 Eclipse Mosquitto MQTT 브로커와 cJSON 라이브러리 컴파일에 필요합니다:
 
 ```bash
 sudo apt update
 sudo apt install git libssl-dev xsltproc docbook-xml docbook-xsl
 ```
 
----
+`libssl-dev`는 SSL/TLS 암호화 지원을 위해 필요하며, `xsltproc`와 docbook 패키지들은 문서 생성에 사용됩니다.
 
-## 2. Build and Install cJSON
+### cJSON 라이브러리 설치
 
-Clone and install the [cJSON](https://github.com/DaveGamble/cJSON) library:
+cJSON은 C 언어로 작성된 경량화된 JSON 파서 라이브러리로, MQTT 라이브러리 설치와 Redis 데이터 저장 시 JSON 형태의 데이터를 다루기 위해 필요합니다:
 
 ```bash
 git clone https://github.com/DaveGamble/cJSON.git
@@ -249,11 +230,9 @@ sudo make install
 cd ..
 ```
 
----
+### Eclipse Mosquitto MQTT 브로커 구성
 
-## 3. Build and Configure Mosquitto MQTT Broker
-
-Clone the [Mosquitto](https://github.com/eclipse/mosquitto) repository:
+Mosquitto는 Eclipse Foundation에서 개발한 오픈소스 MQTT 브로커로, 경량화되어 있으면서도 강력한 기능을 제공합니다:
 
 ```bash
 git clone https://github.com/eclipse/mosquitto
@@ -261,15 +240,15 @@ cd mosquitto
 sudo make
 ```
 
-### Mosquitto Configuration
+### Mosquitto 설정 파일 구성
 
-Edit the Mosquitto configuration file:
+메쉬 네트워킹을 위한 MQTT 브리지를 설정합니다. 이 설정을 통해 여러 브로커 간의 메시지 동기화와 토픽 라우팅이 가능해집니다:
 
 ```bash
 sudo vi /etc/mosquitto/mosquitto.conf
 ```
 
-Add or update with the following configuration to enable listeners and set up MQTT bridges for mesh networking:
+설정 파일 내용:
 
 ```ini
 # Listener configuration
@@ -291,35 +270,35 @@ try_private true
 connection MeshBroker1_3
 address 192.168.100.3:1883
 clientid 1_to_3bridge
-topic sensor/broker1/# out 0
-topic sensor/broker3/# in 0
+topic sensor1/# out 0
+topic sensor3/# in 0
 cleansession false
 restart_timeout 5
 bridge_attempt_unsubscribe false
 try_private true
 
-# presistent
-persistence true
-persistence_file /home/pi/mosquitto.db
-
 # For redis cluster plugin
 plugin /usr/lib/mosquitto/redis_cluster_plugin.so
 ```
 
-# Redis Cluster 기반 분산 Mosquitto MQTT 브로커 시스템
+이 설정에서 브리지 연결은 각 노드 간의 메시지 전달을 담당하며, `topic sensor1/# out 0`은 해당 토픽의 메시지를 다른 브로커로 전송함을 의미하고, `topic sensor2/# in 0`은 다른 브로커로부터 메시지를 수신함을 의미합니다.
 
-## 🚀 설치 및 구성
+## Redis Cluster 기반 분산 시스템 구축
 
-### 1. 의존성 설치
+### 시스템 의존성 및 라이브러리 설치
+
+Redis Cluster를 활용한 분산 MQTT 브로커 시스템을 구축하기 위해 필요한 라이브러리들을 설치합니다. 이러한 라이브러리들은 Redis와의 통신, JSON 데이터 처리, 그리고 Mosquitto 플러그인 개발에 필수적입니다:
 
 ```bash
 sudo apt update
 sudo apt install -y libmosquitto-dev gcc make cmake redis-server
 
+# Redis 데이터 저장을 위해 cJson 설치
 git clone https://github.com/DaveGamble/cJSON.git
 cd cJSON
 make && sudo make install
 
+# Redis 및 Redis_ssl 설치
 git clone https://github.com/redis/hiredis.git
 cd hiredis
 sudo make install USE_SSL=1
@@ -330,9 +309,14 @@ cd hiredis-cluster
 make && sudo make install
 ```
 
-### 2. Redis Cluster 설정
+hiredis는 Redis와 C 프로그램 간의 통신을 위한 클라이언트 라이브러리이며, hiredis-cluster는 Redis Cluster 환경에서의 확장된 기능을 제공합니다.
 
-/etc/redis/redis.conf
+### Redis Cluster 설정 및 구성
+
+Redis Cluster는 데이터를 여러 노드에 분산 저장하여 고가용성과 확장성을 제공하는 Redis의 분산 모드입니다. 각 노드별로 고유한 포트와 설정을 사용하여 클러스터를 구성합니다.
+
+Redis 설정 파일 `/etc/redis/redis.conf` 구성:
+
 ```
 port 7001
 cluster-enabled yes
@@ -347,11 +331,13 @@ bind 0.0.0.0
 protected-mode no
 ```
 
-```
-sudo redis-server /etc/redis/redis.conf
-```
+이 설정에서 `cluster-enabled yes`는 클러스터 모드를 활성화하며, `appendonly yes`는 데이터 지속성을 위한 AOF(Append Only File) 로깅을 활성화합니다. `bind 0.0.0.0`과 `protected-mode no`는 외부 연결을 허용합니다.
 
-```
+Redis 서버 시작 및 클러스터 생성:
+
+```bash
+sudo redis-server /etc/redis/redis.conf
+
 sudo redis-cli --cluster create \
 192.168.100.1:7001 \
 192.168.100.2:7002 \
@@ -359,9 +345,13 @@ sudo redis-cli --cluster create \
 --cluster-replicas 0
 ```
 
-### 3. Mosquitto 플러그인 구현
+`--cluster-replicas 0` 옵션은 복제본 없이 마스터 노드로만 클러스터를 구성함을 의미합니다.
 
-redis_cluster_plugin.c
+### Mosquitto Redis Cluster 플러그인 구현
+
+이 플러그인은 Mosquitto MQTT 브로커와 Redis Cluster 간의 통합을 제공하여 메시지 저장, 세션 관리, 그리고 분산 환경에서의 메시지 라우팅을 담당합니다.
+
+플러그인은 C 언어로 구현되며, `redis_cluster_plugin.c` 파일의 내용은 다음과 같습니다:
 ```c
 #include <mosquitto.h>
 #include <mosquitto_broker.h>
@@ -404,7 +394,7 @@ static int init_redis_cluster(void) {
     return MOSQ_ERR_SUCCESS;
 }
 
-/* redis 명령 실행 */
+/* 키 기반 안전 명령 실행 */
 static redisReply* safe_command(const char *fmt, ...) {
     va_list ap;
     redisReply *reply;
@@ -414,7 +404,7 @@ static redisReply* safe_command(const char *fmt, ...) {
     return reply;
 }
 
-/* 명령어를 첫 번째 마스터 노드에 직접 전송 */
+/* 키 없는 명령어를 첫 번째 마스터 노드에 직접 전송 */
 static redisReply* execute_keyless(const char *cmd) {
     redisClusterNodeIterator iter;
     redisClusterNode *node;
@@ -441,7 +431,7 @@ static long long store_global_log(const char *client_id, const char *topic,
     return id;
 }
 
-/* 세션 저장 */
+/* 세션 저장 (Lock 없이) */
 static int store_session(const char *client_id, const char *state) {
     char key[256];
     snprintf(key, sizeof(key), "session:%s", client_id);
@@ -521,9 +511,11 @@ int mosquitto_plugin_cleanup(void *ud, struct mosquitto_opt *opts, int count) {
 }
 ```
 
-### 4. 빌드 및 설치
+### 플러그인 빌드 및 설치
 
-**`build_install.sh`**:
+플러그인 컴파일과 설치를 자동화하는 빌드 스크립트를 제공합니다. 이 스크립트는 모든 필요한 라이브러리를 링크하여 공유 라이브러리를 생성합니다.
+
+`build_install.sh` 스크립트:
 
 ```bash
 #!/bin/bash
@@ -540,14 +532,32 @@ sudo cp -p redis_cluster_plugin.so /usr/lib/mosquitto/
 echo "Installation completed!"
 ```
 
-오류 발생 시
+컴파일 옵션 설명:
+- `-fPIC`: Position Independent Code, 공유 라이브러리 생성을 위해 필요
+- `-shared`: 공유 라이브러리 생성
+- `-L/usr/local/lib`: 라이브러리 검색 경로 지정
+- 각종 라이브러리 링크: hiredis, hiredis_cluster, pthread, mosquitto, cjson
+
+위에서 만든 쉘 스크립트를 다음 명령어를 통해 실행합니다:
+
+```bash
+sudo bash build_install.sh
+```
+
+라이브러리 경로 오류가 발생할 경우 다음 명령으로 해결할 수 있습니다:
+
 ```
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 echo "/usr/local/lib" | sudo tee /etc/ld.so.conf.d/local.conf
 sudo ldconfig
 ```
 
-### 5. 배포 및 테스트
+## 브로커 시작 및 운영
+
+모든 구성 요소가 설치되고 설정된 후, Mosquitto 브로커를 시작하여 시스템이 정상적으로 동작하는지 확인합니다:
+
 ```
 sudo mosquitto -v -c mosquitto_broker.conf
 ```
+
+`-v` 옵션은 상세한 디버그 정보를 출력하여 시스템 동작 상태를 모니터링할 수 있게 해줍니다. 이를 통해 Redis Cluster 연결 상태, 브리지 연결 성공 여부, 그리고 플러그인 로딩 상태를 실시간으로 확인할 수 있습니다.
