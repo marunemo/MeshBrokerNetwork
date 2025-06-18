@@ -223,18 +223,18 @@ static int acquire_session_lock(const char* client_id, int ttl_seconds) {
     snprintf(lock_key, sizeof(lock_key), "session_lock:%s", client_id);
     
     // 1) 기존 락 소유자 조회
-    redisReply *r = safe_redis_command("GET %s", lock_key);
-    if (r && r->type == REDIS_REPLY_STRING && strcmp(r->str, broker_id) == 0) {
-        freeReplyObject(r);
+    redisReply *reply = safe_redis_command("GET %s", lock_key);
+    if (reply && reply->type == REDIS_REPLY_STRING && strcmp(reply->str, broker_id) == 0) {
+        freeReplyObject(reply);
         return 1;  // 동일 브로커 재접속 허용
     }
-    if (r) freeReplyObject(r);
+    if (reply) freeReplyObject(reply);
 
     // 2) NX EX 옵션으로 락 획득
-    r = safe_redis_command("SET %s %s NX EX %d", lock_key, broker_id, ttl_seconds);
-    if (!r) return 0;
-    int ok = (r->type == REDIS_REPLY_STATUS && strcmp(r->str, "OK") == 0);
-    freeReplyObject(r);
+    reply = safe_redis_command("SET %s %s NX EX %d", lock_key, broker_id, ttl_seconds);
+    if (!reply) return 0;
+    int ok = (reply->type == REDIS_REPLY_STATUS && strcmp(reply->str, "OK") == 0);
+    freeReplyObject(reply);
     return ok;
 }
 
@@ -247,11 +247,11 @@ static int release_session_lock(const char* client_id) {
         "if redis.call('GET', KEYS[1]) == ARGV[1] then "
         "  return redis.call('DEL', KEYS[1]) "
         "else return 0 end";
-    redisReply *r = safe_redis_command("EVAL %s 1 %s %s", script, lock_key, broker_id);
+    redisReply *reply = safe_redis_command("EVAL %s 1 %s %s", script, lock_key, broker_id);
     
-    if (!r) return 0;
-    int deleted = (r->type == REDIS_REPLY_INTEGER && r->integer == 1);
-    freeReplyObject(r);
+    if (!reply) return 0;
+    int deleted = (reply->type == REDIS_REPLY_INTEGER && reply->integer == 1);
+    freeReplyObject(reply);
     return deleted;
 }
 
@@ -355,11 +355,11 @@ static int on_basic_auth(int event, void *event_data, void *userdata) {
     // --- ① 미전송 메시지 조회 ---
     char msgs_key[256];
     snprintf(msgs_key, sizeof(msgs_key), "session_msgs:%s", client_id);
-    redisReply *r = safe_redis_command("LRANGE %s 0 -1", msgs_key);
-    if (r && r->type == REDIS_REPLY_ARRAY) {
-        for (int i = 0; i < r->elements; i++) {
+    redisReply *reply = safe_redis_command("LRANGE %s 0 -1", msgs_key);
+    if (reply && reply->type == REDIS_REPLY_ARRAY) {
+        for (int i = 0; i < reply->elements; i++) {
             // JSON 형태로 저장된 메시지 파싱
-            cJSON *msg_json = cJSON_Parse(r->element[i]->str);
+            cJSON *msg_json = cJSON_Parse(reply->element[i]->str);
             cJSON *topic = cJSON_GetObjectItem(msg_json, "topic");
             cJSON *payload = cJSON_GetObjectItem(msg_json, "payload");
             cJSON *qos = cJSON_GetObjectItem(msg_json, "qos");
@@ -377,12 +377,12 @@ static int on_basic_auth(int event, void *event_data, void *userdata) {
             }
             cJSON_Delete(msg_json);
         }
-        freeReplyObject(r);
+        freeReplyObject(reply);
 
         // --- ② 전송 후 리스트 초기화 ---
         safe_redis_command("DEL %s", msgs_key);
-    } else if (r) {
-        freeReplyObject(r);
+    } else if (reply) {
+        freeReplyObject(reply);
     }
     
     // 세션 정보 업데이트
@@ -486,7 +486,7 @@ static int on_message(int event, void *event_data, void *userdata) {
     char *json = cJSON_PrintUnformatted(obj);
     cJSON_Delete(obj);
 
-    safe_redis_command("LPUSH session_msgs:%s %s", cid, json);
+    safe_redis_command("LPUSH session_msgs:%s %s", client_id, json);
     free(json);
     
     // Retain 메시지 처리
