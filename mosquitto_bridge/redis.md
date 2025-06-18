@@ -355,7 +355,7 @@ static int on_basic_auth(int event, void *event_data, void *userdata) {
     // --- ① 미전송 메시지 조회 ---
     char msgs_key[256];
     snprintf(msgs_key, sizeof(msgs_key), "session_msgs:%s", client_id);
-    redisReply *reply = safe_redis_command("LRANGE %s 0 -1", msgs_key);
+    reply = safe_redis_command("LRANGE %s 0 -1", msgs_key);
     if (reply && reply->type == REDIS_REPLY_ARRAY) {
         for (int i = 0; i < reply->elements; i++) {
             // JSON 형태로 저장된 메시지 파싱
@@ -458,6 +458,7 @@ static int on_acl_check(int event, void *event_data, void *userdata) {
 // 메시지 이벤트 (강화된 중복 방지 및 동기화)
 static int on_message(int event, void *event_data, void *userdata) {
     struct mosquitto_evt_message *msg = event_data;
+    redisReply *reply;
     
     if (!msg || !msg->client) {
         return MOSQ_ERR_INVAL;
@@ -576,6 +577,8 @@ int mosquitto_plugin_cleanup(void *user_data, struct mosquitto_opt *opts, int op
 echo "Building and installing Redis Cluster Mosquitto Plugin..."
 
 # 플러그인 컴파일
+export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+
 gcc -fPIC -shared -o redis_cluster_plugin.so redis_cluster_plugin.c \
     -L/usr/local/lib -lmosquitto -lhiredis -lhircluster -lpthread
 
