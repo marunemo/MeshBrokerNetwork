@@ -217,41 +217,42 @@ static redisReply* safe_redis_command(const char* format, ...) {
     return NULL;
 }
 
-// 분산 락 획득
+// 재접속 시 동일 브로커 허용 로직 포함
 static int acquire_session_lock(const char* client_id, int ttl_seconds) {
-    char lock_key[256];
+    char lock_key[256], owner[64];
     snprintf(lock_key, sizeof(lock_key), "session_lock:%s", client_id);
     
-    redisReply *reply = safe_redis_command("SET %s %s NX EX %d", lock_key, broker_id, ttl_seconds);
-    
-    if (!reply) return 0;
-    
-    int acquired = (reply->type == REDIS_REPLY_STATUS && strcmp(reply->str, "OK") == 0);
-    freeReplyObject(reply);
-    
-    return acquired;
+    // 1) 기존 락 소유자 조회
+    redisReply *r = safe_redis_command("GET %s", lock_key);
+    if (r && r->type == REDIS_REPLY_STRING && strcmp(r->str, broker_id) == 0) {
+        freeReplyObject(r);
+        return 1;  // 동일 브로커 재접속 허용
+    }
+    if (r) freeReplyObject(r);
+
+    // 2) NX EX 옵션으로 락 획득
+    r = safe_redis_command("SET %s %s NX EX %d", lock_key, broker_id, ttl_seconds);
+    if (!r) return 0;
+    int ok = (r->type == REDIS_REPLY_STATUS && strcmp(r->str, "OK") == 0);
+    freeReplyObject(r);
+    return ok;
 }
 
-// 세션 락 해제
+// 세션 락 해제 (소유자 확인 후 삭제)
 static int release_session_lock(const char* client_id) {
     char lock_key[256];
     snprintf(lock_key, sizeof(lock_key), "session_lock:%s", client_id);
-    
-    const char* lua_script = 
+
+    const char* script =
         "if redis.call('GET', KEYS[1]) == ARGV[1] then "
-        "    return redis.call('DEL', KEYS[1]) "
-        "else "
-        "    return 0 "
-        "end";
+        "  return redis.call('DEL', KEYS[1]) "
+        "else return 0 end";
+    redisReply *r = safe_redis_command("EVAL %s 1 %s %s", script, lock_key, broker_id);
     
-    redisReply *reply = safe_redis_command("EVAL %s 1 %s %s", lua_script, lock_key, broker_id);
-    
-    if (!reply) return 0;
-    
-    int released = (reply->type == REDIS_REPLY_INTEGER && reply->integer == 1);
-    freeReplyObject(reply);
-    
-    return released;
+    if (!r) return 0;
+    int deleted = (r->type == REDIS_REPLY_INTEGER && r->integer == 1);
+    freeReplyObject(r);
+    return deleted;
 }
 
 // 글로벌 메시지 로그 저장
@@ -282,25 +283,6 @@ static long long store_global_message_log(const char* client_id, const char* top
     return msg_id;
 }
 
-// 메시지 중복 체크 (강화된 버전) - 고유 메시지 ID 기반
-static int check_message_duplicate_enhanced(const char* client_id, const char* topic, 
-                                           const void* payload, int payloadlen) {
-    // 메시지 해시를 생성하여 중복 체크
-    char hash_input[1024];
-    snprintf(hash_input, sizeof(hash_input), "%s:%s:%d", client_id, topic, payloadlen);
-    
-    char dup_key[512];
-    snprintf(dup_key, sizeof(dup_key), "dup:%s", hash_input);
-    
-    redisReply *reply = safe_redis_command("EXISTS %s", dup_key);
-    if (!reply) return 0;
-    
-    int exists = reply->integer;
-    freeReplyObject(reply);
-    
-    return exists;
-}
-
 // 중복 방지 키 설정
 static void set_duplicate_prevention_key(const char* client_id, const char* topic, 
                                         const void* payload, int payloadlen, int ttl) {
@@ -314,40 +296,32 @@ static void set_duplicate_prevention_key(const char* client_id, const char* topi
     if (reply) freeReplyObject(reply);
 }
 
-// 세션 정보 저장 (동기식 복제 보장)
+// 세션 데이터 저장 (JSON 직렬화 및 동기 복제)
 static int store_session_with_sync(const char* client_id, const char* session_data) {
-    char session_key[256];
-    snprintf(session_key, sizeof(session_key), "session:%s", client_id);
-    
-    // 세션 데이터 저장
-    char msg_info[1024];
-    snprintf(msg_info, sizeof(msg_info),
-            "{\"data\":\"%s\",\"owner\":\"%s\",\"timestamp\":%ld}",
-            session_data, broker_id, time(NULL));
+    // 1) cJSON 객체 생성
+    cJSON *root = cJSON_CreateObject();  
+    cJSON_AddStringToObject(root, "data", session_data);  
+    cJSON_AddStringToObject(root, "owner", broker_id);  
+    cJSON_AddNumberToObject(root, "timestamp", (double)time(NULL));  
 
-    // 세션별 메시지 리스트에 push
-    redisReply *reply = safe_redis_command(
-        "LPUSH session_msgs:%s %s", session_key, msg_info);
-    if (!reply) return -1;
-    freeReplyObject(reply);
-    
-    // 중요한 세션 데이터의 경우 동기식 복제 강제
-    reply = safe_redis_command("WAIT 1 5000"); // 1개 replica, 5초 타임아웃
-    if (reply) {
-        int replicas_synced = reply->integer;
-        if (replicas_synced < 1) {
-            mosquitto_log_printf(MOSQ_LOG_WARNING, "[Redis Plugin] Warning: Session not replicated");
-        }
-        freeReplyObject(reply);
-    }
-    
-    return 0;
+    // 2) JSON 문자열 생성 및 Redis 저장
+    char *json_str = cJSON_PrintUnformatted(root);  
+    cJSON_Delete(root);  
+
+    char key[256];
+    snprintf(key, sizeof(key), "session_msgs:%s", client_id);
+    safe_redis_command("LPUSH %s %s", key, json_str);  
+
+    // 3) 동기 복제 대기
+    safe_redis_command("WAIT 1 5000");  
+    free(json_str);  
+
+    return MOSQ_ERR_SUCCESS;
 }
 
 // 기본 인증 이벤트 (연결 이벤트 대체)
 static int on_basic_auth(int event, void *event_data, void *userdata) {
     struct mosquitto_evt_basic_auth *auth = event_data;
-    
     if (!auth || !auth->client) {
         return MOSQ_ERR_INVAL;
     }
@@ -361,13 +335,8 @@ static int on_basic_auth(int event, void *event_data, void *userdata) {
     
     // 세션 락 획득 시도
     if (!acquire_session_lock(client_id, 300)) {
-        mosquitto_log_printf(MOSQ_LOG_INFO, "[Redis Plugin] Session already owned by another broker: %s", client_id);
-        
-        sleep(1);
-        if (!acquire_session_lock(client_id, 300)) {
-            mosquitto_log_printf(MOSQ_LOG_ERR, "[Redis Plugin] Failed to acquire session lock: %s", client_id);
-            return MOSQ_ERR_AUTH;
-        }
+        mosquitto_log_printf(MOSQ_LOG_ERR, "Failed to acquire session lock: %s", client_id);
+        return MOSQ_ERR_AUTH;
     }
     
     mosquitto_log_printf(MOSQ_LOG_INFO, "[Redis Plugin] Session lock acquired for: %s", client_id);
@@ -383,17 +352,37 @@ static int on_basic_auth(int event, void *event_data, void *userdata) {
     }
     
     // 구독 정보 복원
-    reply = safe_redis_command("HGETALL subs:%s", client_id);
-    if (reply && reply->type == REDIS_REPLY_ARRAY) {
-        for (int i = 0; i < reply->elements; i += 2) {
-            if (i + 1 < reply->elements) {
-                char *topic = reply->element[i]->str;
-                int qos = atoi(reply->element[i+1]->str);
-                mosquitto_log_printf(MOSQ_LOG_INFO, "[Redis Plugin] Restored subscription: %s -> %s (QoS %d)", 
-                       client_id, topic, qos);
+    // --- ① 미전송 메시지 조회 ---
+    char msgs_key[256];
+    snprintf(msgs_key, sizeof(msgs_key), "session_msgs:%s", client_id);
+    redisReply *r = safe_redis_command("LRANGE %s 0 -1", msgs_key);
+    if (r && r->type == REDIS_REPLY_ARRAY) {
+        for (int i = 0; i < r->elements; i++) {
+            // JSON 형태로 저장된 메시지 파싱
+            cJSON *msg_json = cJSON_Parse(r->element[i]->str);
+            cJSON *topic = cJSON_GetObjectItem(msg_json, "topic");
+            cJSON *payload = cJSON_GetObjectItem(msg_json, "payload");
+            cJSON *qos = cJSON_GetObjectItem(msg_json, "qos");
+            cJSON *retain = cJSON_GetObjectItem(msg_json, "retain");
+            if (topic && payload && qos && retain) {
+                mosquitto_publish(
+                    auth->client,
+                    NULL,
+                    topic->valuestring,
+                    payload->valueint,    // payload->valuestring로 변경 필요시 조정
+                    payload->valuestring,
+                    qos->valueint,
+                    retain->valueint
+                );
             }
+            cJSON_Delete(msg_json);
         }
-        freeReplyObject(reply);
+        freeReplyObject(r);
+
+        // --- ② 전송 후 리스트 초기화 ---
+        safe_redis_command("DEL %s", msgs_key);
+    } else if (r) {
+        freeReplyObject(r);
     }
     
     // 세션 정보 업데이트
@@ -480,13 +469,6 @@ static int on_message(int event, void *event_data, void *userdata) {
         mosquitto_log_printf(MOSQ_LOG_ERR, "[Redis Plugin] Failed to get client ID");
         return MOSQ_ERR_INVAL;
     }
-
-    // 강화된 메시지 중복 체크
-    if (check_message_duplicate_enhanced(client_id, msg->topic, msg->payload, msg->payloadlen)) {
-        mosquitto_log_printf(MOSQ_LOG_INFO, "[Redis Plugin] Duplicate message detected: %s:%s", 
-               client_id, msg->topic);
-        return MOSQ_ERR_SUCCESS;
-    }
     
     mosquitto_log_printf(MOSQ_LOG_INFO, "[Redis Plugin] Message received: %s -> %s (QoS %d, Retain %d)", 
            client_id, msg->topic, msg->qos, msg->retain);
@@ -495,15 +477,17 @@ static int on_message(int event, void *event_data, void *userdata) {
     long long global_msg_id = store_global_message_log(
         client_id, msg->topic, msg->payload, msg->payloadlen, msg->qos, msg->retain);
     
-    // 클라이언트별 메시지 저장 (고유 메시지 ID 사용)
-    char msg_key[256];
-    snprintf(msg_key, sizeof(msg_key), "msg:%s:%lld", client_id, global_msg_id);
-    
-    redisReply *reply = safe_redis_command(
-        "HMSET %s topic %s payload %b qos %d retain %d timestamp %ld global_id %lld",
-        msg_key, msg->topic, msg->payload, msg->payloadlen, 
-        msg->qos, msg->retain, time(NULL), global_msg_id);
-    if (reply) freeReplyObject(reply);
+    // 메시지 큐 JSON 생성
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(obj, "topic", msg->topic);
+    cJSON_AddStringToObject(obj, "payload", msg->payload ? (char*)msg->payload : "");
+    cJSON_AddNumberToObject(obj, "qos", msg->qos);
+    cJSON_AddNumberToObject(obj, "retain", msg->retain);
+    char *json = cJSON_PrintUnformatted(obj);
+    cJSON_Delete(obj);
+
+    safe_redis_command("LPUSH session_msgs:%s %s", cid, json);
+    free(json);
     
     // Retain 메시지 처리
     if (msg->retain) {
