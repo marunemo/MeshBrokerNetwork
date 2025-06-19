@@ -11,9 +11,11 @@ BH1750 lightMeter;
 WiFiClient espClient;
 MqttClient mqttClient(espClient);
 
+IPAddress brokerIP;
+
 // WiFi AP 리스트
-const char* ssidList[] = {"MeshBroker1"};
-const char* passwordList[] = {"12345678"};
+const char* ssidList[] = {"MeshBroker1","MeshBroker2","MeshBroker3"};
+const char* passwordList[] = {"12345678","12345678","12345678"};
 const int apCount = sizeof(ssidList)/sizeof(ssidList[0]);
 
 #define SCREEN_WIDTH    128
@@ -94,9 +96,9 @@ void connectWiFi() {
 
         // MQTT 연결 부분
         IPAddress localIP = WiFi.localIP();
-        IPAddress brokerIP(localIP[0], localIP[1], localIP[2], 1);  // 마지막 옥텟만 1로
+        brokerIP = IPAddress(localIP[0], localIP[1], localIP[2], 1);  // 마지막 옥텟만 1로
 
-        mqttClient.setId("arduinoClient");
+        mqttClient.setId("light_sensor_pub");
         mqttClient.connect(brokerIP, 1883);
         Serial.printf("setServer to %s\n", brokerIP.toString().c_str());
 
@@ -202,8 +204,13 @@ void loop() {
   Serial.println(" lx");
 
   // mqtt
-  mqttClient.beginMessage("test/topic", false, 1);
-  mqttClient.print(lux);
+  mqttClient.beginMessage("+/light", false, 1);
+  if (lux > 300) {
+    mqttClient.print("ON");
+  }
+  else {
+    mqttClient.print("OFF");
+  }
   mqttClient.endMessage();
 
   mqttClient.poll();

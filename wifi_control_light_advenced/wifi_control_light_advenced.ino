@@ -12,8 +12,8 @@ WiFiClient espClient;
 PubSubClient mqttclient(espClient);
 
 // WiFi AP 리스트
-const char* ssidList[] = {"MeshBroker1"};
-const char* passwordList[] = {"12345678"};
+const char* ssidList[] = {"MeshBroker1", "MeshBroker2", "MeshBroker3"};
+const char* passwordList[] = {"12345678", "12345678", "12345678"};
 const int apCount = sizeof(ssidList)/sizeof(ssidList[0]);
 
 #define SCREEN_WIDTH    128
@@ -36,19 +36,33 @@ ApInfo apInfos[apCount];
 
 // mqtt 수신 콜백
 void onMessage(char* topic, byte* payload, unsigned int len) {
+  Serial.print("onmessage");
   Serial.print("  ▶ ");
   Serial.print(topic); Serial.print(" : ");
-  for (unsigned int i = 0; i < len; i++) Serial.write(payload[i]);
+
+  String msg = "";
+  for (unsigned int i = 0; i < len; i++) {
+    Serial.write(payload[i]);
+    msg += (char)payload[i];
+  }
+
+  if (msg == "ON") {
+    digitalWrite(21, HIGH);
+  }
+  if (msg == "OFF") {
+    digitalWrite(21, LOW);
+  }
+
   Serial.println();
 }
 
 void reconnect() {
   while (!mqttclient.connected()) {
     Serial.print("MQTT connect… ");
-    if (mqttclient.connect("arduinoClient")) {
+    if (mqttclient.connect("light", NULL, NULL, NULL, 0, false, NULL, false)) {
       Serial.println("OK");
       // QoS 1 구독 가능
-      mqttclient.subscribe("test/topic", 1);   // QoS 1 구독
+      mqttclient.subscribe("+/light", 1);   // QoS 1 구독
     } else {
       Serial.printf("failed (%d). 재시도…\n", mqttclient.state());
       delay(2000);
@@ -115,6 +129,8 @@ void connectWiFi() {
         showMessage("WiFi connected!", WiFi.SSID() + " " + WiFi.localIP().toString());
         Serial.printf("Connected to %s! IP: %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
 
+        Serial.printf("Connected to %s! IP: %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+      
         // MQTT 연결 부분
         IPAddress localIP = WiFi.localIP();
         IPAddress brokerIP(localIP[0], localIP[1], localIP[2], 1);  // 마지막 옥텟만 1로
@@ -188,8 +204,6 @@ void setup() {
 
   // 전구 조절 핀 할당 (21)
   pinMode(21, OUTPUT);
-
-  mqttclient.subscribe("test/topic");
 }
 
 void loop() {
@@ -221,9 +235,11 @@ void loop() {
 
   // mqtt
   if (!mqttclient.connected()) {
+    
     reconnect();
   }
 
+  // Serial.println("mqtt_connected");
   mqttclient.loop();      // 반드시 주기적으로 호출 (MQTT keep-alive & 콜백 처리)
 
   // if (mqttclient.parseMessage()) {
